@@ -108,6 +108,16 @@ h3 {
   color: #f54a45;
 }
 
+.form-row {
+  display: flex;
+  gap: 12px;
+  width: 100%;
+}
+
+.form-group.half {
+  flex: 1;
+}
+
 .form-group {
   width: 100%;
   margin-bottom: 16px;

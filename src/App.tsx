@@ -1,73 +1,6 @@
 import { useState, useEffect } from 'react'
-import { bitable, FieldType, IAttachmentField, IFieldMeta } from '@lark-base-open/js-sdk'
+import { bitable, FieldType, IFieldMeta, ITextField, IUserField, ITableMeta } from '@lark-base-open/js-sdk'
 import './App.css'
-
-/**
- * 处理图片：缩放到指定像素尺寸并居中裁剪，转换为 jpg 格式
- */
-const processImageWithPixel = (blob: Blob, targetWidth: number, targetHeight: number): Promise<Blob> => {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    const url = URL.createObjectURL(blob);
-    
-    img.onload = () => {
-      URL.revokeObjectURL(url);
-      const canvas = document.createElement('canvas');
-      const ctx = canvas.getContext('2d');
-      if (!ctx) {
-        reject(new Error('无法获取 canvas context'));
-        return;
-      }
-
-      // 设置 canvas 为目标像素尺寸
-      canvas.width = targetWidth;
-      canvas.height = targetHeight;
-
-      const imgWidth = img.width;
-      const imgHeight = img.height;
-      const targetRatio = targetWidth / targetHeight;
-      const currentRatio = imgWidth / imgHeight;
-
-      let sourceWidth, sourceHeight, sourceX, sourceY;
-
-      if (currentRatio > targetRatio) {
-        // 原图太宽，以高度为基准缩放，裁剪左右
-        sourceHeight = imgHeight;
-        sourceWidth = imgHeight * targetRatio;
-        sourceX = (imgWidth - sourceWidth) / 2;
-        sourceY = 0;
-      } else {
-        // 原图太高，以宽度为基准缩放，裁剪上下
-        sourceWidth = imgWidth;
-        sourceHeight = imgWidth / targetRatio;
-        sourceX = 0;
-        sourceY = (imgHeight - sourceHeight) / 2;
-      }
-      
-      // 填充白色背景
-      ctx.fillStyle = '#FFFFFF';
-      ctx.fillRect(0, 0, targetWidth, targetHeight);
-      
-      // 将原图裁剪并绘制到目标尺寸的 canvas 上
-      ctx.drawImage(img, sourceX, sourceY, sourceWidth, sourceHeight, 0, 0, targetWidth, targetHeight);
-      
-      canvas.toBlob((result) => {
-        if (result) {
-          resolve(result);
-        } else {
-          reject(new Error('Canvas 转换失败'));
-        }
-      }, 'image/jpeg', 0.9);
-    };
-    
-    img.onerror = () => {
-      URL.revokeObjectURL(url);
-      reject(new Error('图片加载失败，无法处理'));
-    };
-    
-    img.src = url;
-  });
-};
 
 function App() {
   const [tableName, setTableName] = useState<string>('Loading...')
@@ -77,76 +10,137 @@ function App() {
   const [progress, setProgress] = useState<{ current: number; total: number }>({ current: 0, total: 0 })
   const [logs, setLogs] = useState<{ msg: string; type: 'info' | 'success' | 'error' }[]>([])
   
-  // 字段列表状态
-  const [attachmentFields, setAttachmentFields] = useState<IFieldMeta[]>([])
+  // 当前表字段列表
+  const [textFields, setTextFields] = useState<IFieldMeta[]>([])
+  const [userFields, setUserFields] = useState<IFieldMeta[]>([])
   
-  // 选择状态
+  // 映射设置状态
+  const [tableList, setTableList] = useState<ITableMeta[]>([])
+  const [selectedMappingTableId, setSelectedMappingTableId] = useState<string>('')
+  const [mappingTextFields, setMappingTextFields] = useState<IFieldMeta[]>([])
+  const [mappingUserFields, setMappingUserFields] = useState<IFieldMeta[]>([])
+  const [selectedMappingNameFieldId, setSelectedMappingNameFieldId] = useState<string>('')
+  const [selectedMappingUserFieldId, setSelectedMappingUserFieldId] = useState<string>('')
+
+  // 转换选择状态
   const [selectedSourceFieldId, setSelectedSourceFieldId] = useState<string>('')
   const [selectedTargetFieldId, setSelectedTargetFieldId] = useState<string>('')
-  const [targetWidth, setTargetWidth] = useState<number>(800)
-  const [targetHeight, setTargetHeight] = useState<number>(800)
 
+  // 初始化：获取当前表信息和所有表列表
   useEffect(() => {
-    const fetchData = async () => {
+    const initData = async () => {
       try {
-        const table = await bitable.base.getActiveTable()
-        const name = await table.getName()
+        const activeTable = await bitable.base.getActiveTable()
+        const name = await activeTable.getName()
         setTableName(name)
-
-        const recordList = await table.getRecordIdList()
+        const recordList = await activeTable.getRecordIdList()
         setRecordCount(recordList.length)
 
-        // 获取所有附件字段 (17)
-        const attachFields = await table.getFieldMetaListByType(FieldType.Attachment)
-        setAttachmentFields(attachFields)
-        
-        if (attachFields.length > 0) {
-          if (!selectedSourceFieldId) setSelectedSourceFieldId(attachFields[0].id)
-          if (!selectedTargetFieldId) setSelectedTargetFieldId(attachFields[0].id)
+        // 获取所有表列表供选择映射表
+        const tables = await bitable.base.getTableMetaList()
+        setTableList(tables)
+        if (tables.length > 0 && !selectedMappingTableId) {
+          setSelectedMappingTableId(activeTable.id) // 默认选当前表
         }
+
+        // 获取当前表的可选字段
+        const allFields = await activeTable.getFieldMetaList()
+        const tFields = allFields.filter(f => f.type === FieldType.Text)
+        const uFields = allFields.filter(f => f.type === FieldType.User)
+        setTextFields(tFields)
+        setUserFields(uFields)
+        
+        if (tFields.length > 0 && !selectedSourceFieldId) setSelectedSourceFieldId(tFields[0].id)
+        if (uFields.length > 0 && !selectedTargetFieldId) setSelectedTargetFieldId(uFields[0].id)
       } catch (error) {
-        console.error('Failed to fetch fields:', error)
+        console.error('Init failed:', error)
       }
     }
+    initData()
+  }, [])
 
-    fetchData()
-
-    const off = bitable.base.onSelectionChange(async (event) => {
-      if (event.data.tableId) {
-        fetchData()
+  // 当映射表改变时，获取映射表的字段列表
+  useEffect(() => {
+    const updateMappingFields = async () => {
+      if (!selectedMappingTableId) return
+      try {
+        const table = await bitable.base.getTableById(selectedMappingTableId)
+        const allFields = await table.getFieldMetaList()
+        
+        const tFields = allFields.filter(f => f.type === FieldType.Text)
+        const uFields = allFields.filter(f => f.type === FieldType.User)
+        
+        setMappingTextFields(tFields)
+        setMappingUserFields(uFields)
+        
+        if (tFields.length > 0) setSelectedMappingNameFieldId(tFields[0].id)
+        if (uFields.length > 0) setSelectedMappingUserFieldId(uFields[0].id)
+      } catch (error) {
+        console.error('Failed to update mapping fields:', error)
       }
-    })
-
-    return () => off()
-  }, [selectedSourceFieldId, selectedTargetFieldId])
+    }
+    updateMappingFields()
+  }, [selectedMappingTableId])
 
   const addLog = (msg: string, type: 'info' | 'success' | 'error' = 'info') => {
-    setLogs(prev => [{ msg, type }, ...prev].slice(0, 50)) // 保留最近50条
+    setLogs(prev => [{ msg, type }, ...prev].slice(0, 50))
   }
 
   const handleConvert = async () => {
-    if (!selectedSourceFieldId || !selectedTargetFieldId) {
-      setStatusMsg('请先选择源字段和目标字段')
+    if (!selectedSourceFieldId || !selectedTargetFieldId || !selectedMappingTableId || !selectedMappingNameFieldId || !selectedMappingUserFieldId) {
+      setStatusMsg('请完善转换和映射设置')
       return
     }
 
     setIsConverting(true)
     setStatusMsg('正在初始化处理...')
-    setLogs([]) // 清空旧日志
+    setLogs([])
 
     try {
-      const table = await bitable.base.getActiveTable()
-      const recordIds = await table.getRecordIdList()
-      const total = recordIds.length
+      const activeTable = await bitable.base.getActiveTable()
+      const mappingTable = await bitable.base.getTableById(selectedMappingTableId)
       
-      if (total === 0) {
-        throw new Error('当前表格没有记录')
+      // 1. 从指定的映射表建立姓名-ID 映射
+      addLog(`正在从映射表 [${(await mappingTable.getName())}] 构建映射关系...`, 'info')
+      const nameToIdMap = new Map<string, string>()
+
+      // 批量获取映射表记录
+      const { records: mappingRecords } = await mappingTable.getRecords({ pageSize: 5000 })
+      
+      mappingRecords.forEach(record => {
+        const nameVal = record.fields[selectedMappingNameFieldId]
+        const userVal = record.fields[selectedMappingUserFieldId]
+        
+        let name = ''
+        if (typeof nameVal === 'string') {
+          name = nameVal.trim().toLowerCase()
+        } else if (Array.isArray(nameVal)) {
+          name = nameVal.map((v: any) => v.text || '').join('').trim().toLowerCase()
+        }
+
+        if (name && userVal && Array.isArray(userVal) && userVal.length > 0) {
+          // 取第一个人员
+          const user = userVal[0] as any
+          const userId = user?.id
+          if (userId) {
+            nameToIdMap.set(name, userId)
+          }
+        }
+      })
+
+      if (nameToIdMap.size === 0) {
+        throw new Error('映射表中未找到有效的“姓名-人员”对应关系，请检查字段选择和数据。')
       }
 
+      addLog(`映射关系构建完成，共识别 ${nameToIdMap.size} 条规则`, 'success')
+
+      // 2. 开始转换主表数据
+      const recordIds = await activeTable.getRecordIdList()
+      const total = recordIds.length
       setProgress({ current: 0, total })
       
-      const sourceField = await table.getField<IAttachmentField>(selectedSourceFieldId)
-      const targetField = await table.getField<IAttachmentField>(selectedTargetFieldId)
+      const sourceField = await activeTable.getField<ITextField>(selectedSourceFieldId)
+      const targetField = await activeTable.getField<IUserField>(selectedTargetFieldId)
 
       let successCount = 0
       let skipCount = 0
@@ -157,84 +151,38 @@ function App() {
         setProgress({ current: i + 1, total })
 
         try {
-          // 1. 获取源附件字段的值
-          const attachmentList = await sourceField.getValue(recordId)
-          
-          if (!attachmentList || !Array.isArray(attachmentList) || attachmentList.length === 0) {
-            addLog(`第 ${i+1} 行: 未找到附件`, 'info')
+          const textValue = await sourceField.getValue(recordId)
+          let originalName = ''
+          if (textValue) {
+            if (typeof textValue === 'string') {
+              originalName = textValue
+            } else if (Array.isArray(textValue)) {
+              originalName = textValue.map((v: any) => v.text || '').join('')
+            }
+          }
+
+          const name = originalName.trim().toLowerCase()
+          if (!name) {
             skipCount++
             continue
           }
 
-          addLog(`第 ${i+1} 行: 正在处理 ${attachmentList.length} 个附件...`, 'info')
-
-          const processedFiles: File[] = []
-          
-          // 批量获取所有附件的 URL
-          const tokens = attachmentList.map(a => a.token)
-          const urls = await table.getCellAttachmentUrls(tokens, selectedSourceFieldId, recordId)
-
-          for (let j = 0; j < attachmentList.length; j++) {
-            const attachment = attachmentList[j]
-            const url = urls[j]
-            
-            try {
-              // 检查是否为图片 (简单判断扩展名或 mime 类型)
-              const fileName = attachment.name || 'image.jpg'
-              const isImage = /\.(jpg|jpeg|png|webp|gif|bmp)$/i.test(fileName)
-              
-              if (!isImage) {
-                addLog(`跳过非图片文件: ${fileName}`, 'info')
-                continue
-              }
-
-              // 下载附件
-              addLog(`正在下载附件: ${fileName}`, 'info')
-              const response = await fetch(url)
-              if (!response.ok) throw new Error(`下载失败: ${response.statusText}`)
-              let blob = await response.blob()
-
-              // 处理图片比例
-              addLog(`正在调整像素: ${fileName}`, 'info')
-              blob = await processImageWithPixel(blob, targetWidth, targetHeight)
-
-              // 构造新文件名
-              const baseName = fileName.includes('.') 
-                ? fileName.substring(0, fileName.lastIndexOf('.'))
-                : fileName;
-              const newFileName = `${baseName}_${targetWidth}x${targetHeight}.jpg`
-
-              processedFiles.push(new File([blob], newFileName, { type: 'image/jpeg' }))
-              addLog(`已处理完成: ${newFileName}`, 'success')
-            } catch (err: any) {
-              addLog(`处理附件失败: ${attachment.name} - ${err.message}`, 'error')
-            }
-          }
-
-          if (processedFiles.length > 0) {
-            // 3. 直接使用 setValue 设置附件，SDK 会处理上传逻辑
-            addLog(`正在上传 ${processedFiles.length} 个文件到目标字段...`, 'info')
-            const res = await targetField.setValue(recordId, processedFiles)
-            if (res) {
-              addLog(`第 ${i+1} 行: 处理成功`, 'success')
-              successCount++
-            } else {
-              addLog(`第 ${i+1} 行: 设置失败 (SDK 返回 false)`, 'error')
-              failCount++
-            }
+          const userId = nameToIdMap.get(name)
+          if (userId) {
+            await targetField.setValue(recordId, [{ id: userId }])
+            addLog(`第 ${i+1} 行: "${originalName.trim()}" 转换成功`, 'success')
+            successCount++
           } else {
-            addLog(`第 ${i+1} 行: 无有效图片可处理`, 'info')
-            skipCount++
+            addLog(`第 ${i+1} 行: "${originalName.trim()}" 未匹配到映射`, 'error')
+            failCount++
           }
-          
-        } catch (recordError: any) {
-          console.error(`Error processing record ${recordId}:`, recordError)
-          addLog(`第 ${i+1} 行: 失败 - ${recordError.message}`, 'error')
+        } catch (err: any) {
+          addLog(`第 ${i+1} 行: 错误 - ${err.message}`, 'error')
           failCount++
         }
       }
 
-      setStatusMsg(`处理完成！成功: ${successCount}, 跳过: ${skipCount}, 失败: ${failCount}`)
+      setStatusMsg(`处理完成！成功: ${successCount}, 失败: ${failCount}, 跳过: ${skipCount}`)
     } catch (error: any) {
       console.error(error)
       setStatusMsg(`失败: ${error.message || '未知错误'}`)
@@ -246,74 +194,82 @@ function App() {
 
   return (
     <div className="container">
-      <h1>图片尺寸调整</h1>
+      <h1>人名转人员工具</h1>
       
       <div className="card">
-        <h3>📊 表格信息</h3>
-        <p>当前表: <strong>{tableName}</strong></p>
+        <h3>📊 运行环境</h3>
+        <p>目标表: <strong>{tableName}</strong></p>
         <p>记录数: <strong>{recordCount}</strong></p>
       </div>
 
       <div className="card">
-        <h3>🖼️ 调整图片像素</h3>
-        <p className="desc">自动遍历全表，将图片缩放并裁剪至指定像素尺寸</p>
+        <h3>🗺️ 映射设置</h3>
+        <p className="desc">请选择包含“姓名”与“人员”对应关系的映射表及字段</p>
         
         <div className="form-group">
-          <label>� 源附件字段</label>
+          <label>选择映射表</label>
+          <select 
+            value={selectedMappingTableId} 
+            onChange={(e) => setSelectedMappingTableId(e.target.value)}
+            disabled={isConverting}
+            className="field-select"
+          >
+            {tableList.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+          </select>
+        </div>
+
+        <div className="form-row">
+          <div className="form-group half">
+            <label>映射姓名列 (文本)</label>
+            <select 
+              value={selectedMappingNameFieldId} 
+              onChange={(e) => setSelectedMappingNameFieldId(e.target.value)}
+              disabled={isConverting}
+              className="field-select"
+            >
+              {mappingTextFields.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}
+            </select>
+          </div>
+          <div className="form-group half">
+            <label>映射人员列 (人员)</label>
+            <select 
+              value={selectedMappingUserFieldId} 
+              onChange={(e) => setSelectedMappingUserFieldId(e.target.value)}
+              disabled={isConverting}
+              className="field-select"
+            >
+              {mappingUserFields.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div className="card">
+        <h3>🔄 转换设置</h3>
+        <p className="desc">根据上述映射规则，将当前表的文本字段转换为人员字段</p>
+        
+        <div className="form-group">
+          <label>📝 源文本列 (待转人名)</label>
           <select 
             value={selectedSourceFieldId} 
             onChange={(e) => setSelectedSourceFieldId(e.target.value)}
             disabled={isConverting}
             className="field-select"
           >
-            {attachmentFields.length > 0 ? (
-              attachmentFields.map(field => (
-                <option key={field.id} value={field.id}>{field.name}</option>
-              ))
-            ) : (
-              <option value="">未找到附件字段</option>
-            )}
+            {textFields.map(field => <option key={field.id} value={field.id}>{field.name}</option>)}
           </select>
         </div>
 
         <div className="form-group">
-          <label>📁 目标附件字段</label>
+          <label>� 目标人员列 (填充结果)</label>
           <select 
             value={selectedTargetFieldId} 
             onChange={(e) => setSelectedTargetFieldId(e.target.value)}
             disabled={isConverting}
             className="field-select"
           >
-            {attachmentFields.length > 0 ? (
-              attachmentFields.map(field => (
-                <option key={field.id} value={field.id}>{field.name}</option>
-              ))
-            ) : (
-              <option value="">未找到附件字段</option>
-            )}
+            {userFields.map(field => <option key={field.id} value={field.id}>{field.name}</option>)}
           </select>
-        </div>
-
-        <div className="form-group">
-          <label>📐 目标像素 (宽 x 高)</label>
-          <div className="ratio-inputs">
-            <input 
-              type="number" 
-              value={targetWidth} 
-              onChange={(e) => setTargetWidth(Number(e.target.value) || 1)}
-              disabled={isConverting}
-              placeholder="宽"
-            />
-            <span>x</span>
-            <input 
-              type="number" 
-              value={targetHeight} 
-              onChange={(e) => setTargetHeight(Number(e.target.value) || 1)}
-              disabled={isConverting}
-              placeholder="高"
-            />
-            <span style={{ fontSize: '0.8rem', color: '#8f959e', fontWeight: 'normal' }}>px</span>
-          </div>
         </div>
 
         {isConverting && progress.total > 0 && (
@@ -333,7 +289,7 @@ function App() {
           disabled={isConverting || !selectedSourceFieldId || !selectedTargetFieldId}
           className={`convert-btn ${isConverting ? 'loading' : ''}`}
         >
-          {isConverting ? '正在处理中...' : '开始调整比例'}
+          {isConverting ? '正在转换中...' : '开始执行转换'}
         </button>
         {statusMsg && <p className={`status-msg ${statusMsg.includes('完成') || statusMsg.includes('成功') ? 'success' : 'error'}`}>{statusMsg}</p>}
 
@@ -352,7 +308,7 @@ function App() {
       </div>
 
       <p className="footer">
-        基于 @lark-base-open/js-sdk 开发
+        多维表格插件 - 人名转人员
       </p>
     </div>
   )
